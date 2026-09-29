@@ -229,14 +229,14 @@ viewer_step :: proc(a: ^App, pi: int, step: int) {
 	for vi, i in t.view {
 		e := &t.entries[vi]
 		if !viewable(e) { continue }
-		if join({t.dir, e.name}) == current { at = len(list) }
+		if entry_path(t, e) == current { at = len(list) }
 		append(&list, i)
 	}
 	if len(list) == 0 { return }
 	next := at < 0 ? 0 : (at + step + len(list)) % len(list)
 	e := &t.entries[t.view[list[next]]]
 	t.cursor = list[next]
-	viewer_open(a, pi, join({t.dir, e.name}))
+	viewer_open(a, pi, entry_path(t, e))
 }
 
 viewer_close :: proc(a: ^App, pi: int) {

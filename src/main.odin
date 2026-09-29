@@ -7,11 +7,14 @@
 // config) and icon-theme loader (package desktop).
 //
 // Usage: spoil [folder or file]   (a file opens its folder with it selected)
+//        spoil --search QUERY       (the disk index, from the command line)
+//        spoil --reindex
 package spoil
 
 import "core:fmt"
 import "core:log"
 import "core:os"
+import "core:strings"
 import "core:sys/posix"
 import tx "milk:tx"
 
@@ -26,13 +29,27 @@ on_quit_signal :: proc "c" (sig: posix.Signal) { g_quit = true }
 main :: proc() {
 	verbose := false
 	start := ""
-	for arg in os.args[1:] {
+	args := os.args[1:]
+	for len(args) > 0 {
+		arg := args[0]
+		args = args[1:]
 		switch arg {
 		case "-v", "--verbose":
 			verbose = true
 		case "-h", "--help":
-			fmt.println("usage: spoil [-v] [folder]\n\nmilk's file manager. Opens the folder given (or a file's folder), else $HOME.")
+			fmt.println("usage: spoil [-v] [folder]\n       spoil --search QUERY\n       spoil --reindex\n\n" +
+			            "milk's file manager. Opens the folder given (or a file's folder), else $HOME.\n" +
+			            "--search prints the paths on the disk matching QUERY (as in a search tab, hidden files included);\n" +
+			            "--reindex walks the disk again to refresh the index.")
 			return
+		case "--reindex":
+			os.exit(cli_reindex() ? 0 : 1)
+		case "--search":
+			if len(args) == 0 {
+				fmt.eprintln("spoil: --search needs a query")
+				os.exit(2)
+			}
+			os.exit(cli_search(strings.join(args, " ", context.temp_allocator)) ? 0 : 1)
 		case "--version":
 			fmt.printfln("spoil %s", VERSION)
 			return

@@ -41,11 +41,15 @@ Entry :: struct {
 	unreadable: bool,   // no permission to read (or to enter, for folders)
 	hidden:     bool,
 	selected:   bool,
+	dir:        string, // search results: the folder holding it (owned); "" = the tab's folder
+	pending:    bool,   // search results: size and date not known yet
+	gone:       bool,   // search results: no longer on the disk
 }
 
 entry_destroy :: proc(e: ^Entry) {
 	delete(e.name)
 	delete(e.key)
+	delete(e.dir)
 	e^ = {}
 }
 

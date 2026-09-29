@@ -39,7 +39,7 @@ run_command :: proc(a: ^App, cmd: Command, on_item: bool, area: int) {
 	case .Compress:   card_open_compress(a)
 	case .Extract_Here, .Extract_Folder:
 		for path in selected_paths(t) {
-			if is_archive(path) { extract(a, path, t.dir, cmd == .Extract_Folder) }
+			if is_archive(path) { extract(a, path, is_search(t) ? parent_dir(path) : t.dir, cmd == .Extract_Folder) }
 		}
 	case .New_Tab:
 		dir := t.dir
@@ -61,7 +61,7 @@ run_command :: proc(a: ^App, cmd: Command, on_item: bool, area: int) {
 		open_terminal(a, dir)
 	case .Wallpaper:
 		sel := selected_entries(t)
-		if len(sel) == 1 { set_wallpaper(a, join({t.dir, t.entries[sel[0]].name}), area) }
+		if len(sel) == 1 { set_wallpaper(a, entry_path(t, &t.entries[sel[0]]), area) }
 	case .Close_Tab:
 		close_tab(a, a.menu.tab_pane, a.menu.tab_index)
 	case .Close_Other_Tabs:
@@ -72,6 +72,9 @@ run_command :: proc(a: ^App, cmd: Command, on_item: bool, area: int) {
 		}
 	case .Tab_To_Pane:
 		move_tab(a, a.menu.tab_pane, a.menu.tab_index, -1, -1, a.menu.tab_pane + 1)
+	case .Open_Folder: search_reveal(a)
+	case .Search:      search_open(a)
+	case .Reindex:     search_reindex(a)
 	}
 	a.dirty = true
 }
@@ -79,7 +82,7 @@ run_command :: proc(a: ^App, cmd: Command, on_item: bool, area: int) {
 @(private)
 single_selected_dir :: proc(t: ^Tab) -> (string, bool) {
 	sel := selected_entries(t)
-	if len(sel) == 1 && t.entries[sel[0]].is_dir { return join({t.dir, t.entries[sel[0]].name}), true }
+	if len(sel) == 1 && t.entries[sel[0]].is_dir { return entry_path(t, &t.entries[sel[0]]), true }
 	return "", false
 }
 
@@ -98,21 +101,22 @@ open_selection :: proc(a: ^App) {
 			return
 		}
 		if e.is_dir {
-			navigate(a, t, join({t.dir, e.name}))
+			// Search results keep their tab: the folder opens in a new one.
+			if is_search(t) { new_tab(a, a.active_pane, entry_path(t, e)) } else { navigate(a, t, entry_path(t, e)) }
 			return
 		}
 	}
 	// One picture, video or song: shown inside the pane when mpv is installed.
 	if len(sel) == 1 {
 		e := &t.entries[sel[0]]
-		if viewable(e) && viewer_open(a, a.active_pane, join({t.dir, e.name})) { return }
+		if viewable(e) && viewer_open(a, a.active_pane, entry_path(t, e)) { return }
 	}
 	opened := 0
 	for idx in sel {
 		e := &t.entries[idx]
 		if e.is_dir || e.kind == .Broken { continue }
 		if opened >= 12 { break } // a runaway multi-selection should not start 500 viewers
-		if launch(a, {"xdg-open", join({t.dir, e.name})}, t.dir) { opened += 1 }
+		if launch(a, {"xdg-open", entry_path(t, e)}, entry_dir(t, e)) { opened += 1 }
 	}
 }
 
@@ -157,6 +161,7 @@ rename_start :: proc(a: ^App) {
 	e := &t.entries[idx]
 	delete(a.rename_name)
 	a.rename_name = strings.clone(e.name)
+	a.rename_index = idx
 	field_set(&a.rename, e.name)
 	// Select the name without its extension, like other file managers.
 	stop := len(e.name)
@@ -200,8 +205,17 @@ rename_commit :: proc(a: ^App) -> bool {
 		set_notice(a, tr(a, "O nome não pode conter “/”", "The name cannot contain “/”"), true)
 		return false
 	}
-	from := join({t.dir, old})
-	to := join({t.dir, name})
+	dir := t.dir
+	idx := a.rename_index
+	if is_search(t) {
+		if idx < 0 || idx >= len(t.entries) || t.entries[idx].name != old {
+			rename_cancel(a)
+			return true
+		}
+		dir = entry_dir(t, &t.entries[idx])
+	}
+	from := join({dir, old})
+	to := join({dir, name})
 	if path_exists(to) && strings.to_lower(name, context.temp_allocator) != strings.to_lower(old, context.temp_allocator) {
 		set_notice(a, fmt.tprintf(tr(a, "Já existe um item chamado “%s”", "An item called “%s” already exists"), name), true)
 		return false
@@ -213,6 +227,15 @@ rename_commit :: proc(a: ^App) -> bool {
 	}
 	new_name := strings.clone(name, context.temp_allocator)
 	rename_cancel(a)
+	if is_search(t) {
+		// The index does not know the new name yet: rename the result in place.
+		e := &t.entries[idx]
+		delete(e.name)
+		e.name = strings.clone(new_name)
+		if !e.is_dir { e.kind = kind_for_name(e.name, e.kind == .Executable) }
+		a.dirty = true
+		return true
+	}
 	refresh(a, t)
 	select_by_name(a, t, new_name)
 	return true
@@ -225,6 +248,7 @@ rename_finish :: proc(a: ^App) {
 new_folder :: proc(a: ^App) {
 	if a.focus == .Rename { rename_finish(a) }
 	t := cur_tab(a)
+	if is_search(t) { return }
 	name := unique_name(t.dir, tr(a, "Nova pasta", "New folder"), true)
 	if err := os.make_directory(join({t.dir, name})); err != nil {
 		set_notice(a, fmt.tprintf(tr(a, "Não foi possível criar a pasta: %s", "Cannot create the folder: %s"), os.error_string(err)), true)
@@ -255,6 +279,10 @@ copy_selection :: proc(a: ^App, cut: bool) {
 
 paste :: proc(a: ^App) {
 	if len(a.clip.paths) == 0 { return }
+	if is_search(cur_tab(a)) {
+		set_notice(a, tr(a, "Abra uma pasta para colar", "Open a folder to paste"), true)
+		return
+	}
 	cut := a.clip.cut
 	paths := make([]string, len(a.clip.paths), context.temp_allocator)
 	for p, i in a.clip.paths { paths[i] = strings.clone(p, context.temp_allocator) }
@@ -374,7 +402,7 @@ jobs_tick :: proc(a: ^App) {
 	for s in selects {
 		for p in a.panes {
 			t := p.tabs[p.active]
-			if t.dir == s[0] { select_by_name(a, t, s[1]) }
+			if t.dir == s[0] && !is_search(t) { select_by_name(a, t, s[1]) }
 		}
 	}
 	explain :: proc(msg, why: string) -> string { return why == "" ? msg : fmt.tprintf("%s: %s", msg, why) }

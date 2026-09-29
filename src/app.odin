@@ -1,6 +1,7 @@
 // The Spoil window: a normal managed top-level (WM_CLASS spoil/Spoil) with
 // milk's look, its state, and the event loop (one X connection, poll() on the
-// X fd and the thumbnail wake-up pipe, a timeout for animations and timers).
+// X fd and the thumbnail and search wake-up pipes, a timeout for animations
+// and timers).
 package spoil
 
 import "core:fmt"
@@ -38,6 +39,9 @@ Action :: enum {
 	Card_Field, Card_Format, Card_Cancel, Card_Ok, // the "Comprimir…" card
 	Viewer_Prev, Viewer_Next, Viewer_External, Viewer_Close, // the embedded viewer (see embed.odin)
 	Term_Close, // the embedded terminal
+	Search_Tab,  // the magnifier next to a tab strip: search the disk
+	Sort_Column, // arg = Search_Sort (a search tab's column titles)
+	Reindex,
 }
 
 Hit :: struct {
@@ -81,6 +85,7 @@ App :: struct {
 	look:         string, // look_signature of the style in use (owned)
 	icons:        Icon_Set,
 	thumbs:       Thumbs,
+	search:       Search_Service, // the disk index and its searches (search.odin)
 
 	// Panes and tabs
 	panes:        [dynamic]^Pane,
@@ -92,6 +97,7 @@ App :: struct {
 	focus:        Focus,
 	rename:       Field,
 	rename_name:  string, // the entry being renamed in the active tab (owned)
+	rename_index: int,    // its index in the tab's entries
 
 	// Pointer
 	hits:         [dynamic]Hit,
@@ -140,6 +146,7 @@ app_create :: proc(c: ^tx.Connection, start_dir: string) -> (^App, bool) {
 		return a, false
 	}
 	thumbs_init(a)
+	search_init(a)
 	t := tab_create(.Grid, false)
 	if !navigate(a, t, start_dir, false) {
 		log.warnf("Cannot open %s; showing the home folder", start_dir)
@@ -156,6 +163,7 @@ app_create :: proc(c: ^tx.Connection, start_dir: string) -> (^App, bool) {
 
 app_destroy :: proc(a: ^App) {
 	if a == nil { return }
+	search_destroy(a)
 	embeds_destroy(a)
 	card_close(a)
 	card_destroy(a)
@@ -245,7 +253,7 @@ open_window :: proc(a: ^App) -> bool {
 
 set_title :: proc(a: ^App) {
 	if a.win == 0 || len(a.panes) == 0 { return }
-	name := dir_label(a, cur_tab(a).dir)
+	name := tab_label(a, cur_tab(a))
 	tx.set_utf8_string(a.c, a.win, "_NET_WM_NAME", fmt.tprintf("Spoil · %s", name))
 	tx.set_utf8_string(a.c, a.win, "_NET_WM_ICON_NAME", "Spoil")
 }
@@ -285,12 +293,13 @@ run :: proc(a: ^App) {
 		if tx.pending(c) > 0 { continue }
 
 		timeout := next_timeout(a, tx.now())
-		fds: [2]posix.pollfd
+		fds: [3]posix.pollfd
 		fds[0] = {fd = posix.FD(c.fd), events = {.IN}}
 		n := 1
-		if a.thumbs.wake_r >= 0 {
-			fds[1] = {fd = a.thumbs.wake_r, events = {.IN}}
-			n = 2
+		for fd in ([]posix.FD{a.thumbs.wake_r, a.search.wake_r}) {
+			if fd < 0 { continue }
+			fds[n] = {fd = fd, events = {.IN}}
+			n += 1
 		}
 		ms: i32 = timeout < 0 ? -1 : i32(timeout * 1000) + 1
 		posix.poll(&fds[0], posix.nfds_t(n), ms)
@@ -299,6 +308,7 @@ run :: proc(a: ^App) {
 
 tick :: proc(a: ^App, now: f64) {
 	if thumbs_collect(a) { a.dirty = true }
+	if search_tick(a) { a.dirty = true }
 	jobs_tick(a)
 	embeds_tick(a)
 	reap_children(a)
@@ -306,6 +316,7 @@ tick :: proc(a: ^App, now: f64) {
 		a.next_check = now + 1
 		if check_config(a) { a.dirty = true }
 		check_directories(a)
+		search_keepalive(a)
 	}
 	if a.notice != "" && now >= a.notice_until {
 		delete(a.notice)
@@ -342,6 +353,7 @@ next_timeout :: proc(a: ^App, now: f64) -> f64 {
 	if len(a.jobs) > 0 { t = min(t, 1.0 / 15) }
 	if len(a.children) > 0 { t = min(t, 0.25) }
 	if drag_autoscrolling(a) { t = min(t, 1.0 / 60) }
+	if busy, _ := search_indexing(a); busy { t = min(t, 0.5) } // the item counter
 	return t
 }
 

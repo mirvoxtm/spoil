@@ -43,6 +43,7 @@ Layout :: struct {
 	content_h: i32,
 	col_size:  i32, // list: right edge of the size column (area coordinates)
 	col_date:  i32, // list: left edge of the date column
+	col_path:  i32, // list of a search tab: left edge of the folder column (area.w = none)
 }
 
 // Pane columns: the width after the sidebar shared by weight.
@@ -107,6 +108,13 @@ pane_layout :: proc(a: ^App, pi: int) -> Layout {
 			// Narrow pane: no date column.
 			L.col_date = L.area.w
 			L.col_size = L.area.w - 16
+		}
+		// Search results: Nome | Pasta | Tamanho | Modificado, when there is room.
+		L.col_path = L.area.w
+		if is_search(t) {
+			name_x := i32(12 + LIST_ICON + 10)
+			room := L.col_size - 96 - name_x
+			if room >= 300 { L.col_path = name_x + room * 2 / 5 }
 		}
 	}
 	return L
@@ -282,7 +290,7 @@ draw_sidebar :: proc(a: ^App, cv: ^tx.Canvas) {
 	y := sb.y + 2 - a.side_scroll
 	in_milk := false
 	start := y
-	cur := cur_tab(a).dir
+	cur := is_search(cur_tab(a)) ? "" : cur_tab(a).dir
 	for p, i in places {
 		if p.milk && !in_milk {
 			in_milk = true
@@ -324,7 +332,7 @@ TAB_PILL_H :: 28
 // Width of each tab in pane `pi` (all tabs share the strip).
 tab_width :: proc(a: ^App, pi: int, L: ^Layout) -> i32 {
 	n := i32(len(a.panes[pi].tabs))
-	avail := L.tabs.w - TAB_PILL_H - 6
+	avail := L.tabs.w - 2 * TAB_PILL_H - 10 // the "+" and the magnifier
 	return clamp(avail / max(n, 1) - 4, 56, 210)
 }
 
@@ -340,7 +348,7 @@ draw_tabs :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 	x := strip.x
 	for t, i in p.tabs {
 		r := tx.Rect{x, y, w, TAB_PILL_H}
-		if r.x + r.w > strip.x + strip.w - TAB_PILL_H - 4 { break }
+		if r.x + r.w > strip.x + strip.w - 2 * TAB_PILL_H - 8 { break }
 		x += w + 4
 		dragged := a.drag.kind == .Tab && a.drag.pane == pi && a.drag.arg == i
 		is_active := i == p.active
@@ -364,10 +372,10 @@ draw_tabs :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 			stroke_rounded(cv, r, f32(r.h) / 2, 1.5, tx.color_with_alpha(th.accent, 160))
 			fg = th.muted
 		}
-		glyph(a, a.style.icon_small, {r.x + 8, r.y, 20, r.h}, t.dir == clean_path(home_dir()) ? .Home : .Folder, fg)
+		glyph(a, a.style.icon_small, {r.x + 8, r.y, 20, r.h}, tab_icon(t), fg)
 		show_close := hot || is_active
 		label_right := r.x + r.w - (show_close ? 28 : 12)
-		label := tx.text_ellipsize(a.c, a.style.font_small, dir_label(a, t.dir), label_right - (r.x + 32))
+		label := tx.text_ellipsize(a.c, a.style.font_small, tab_label(a, t), label_right - (r.x + 32))
 		text_box(a, a.style.font_small, r.x + 32, r.y, r.h, label, fg, r)
 		add_hit(a, r, .Tab, pi, i)
 		if show_close {
@@ -383,6 +391,11 @@ draw_tabs :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 	if hovered(a, .Tab_New, pi) { fill_rounded(cv, plus, f32(plus.h) / 2, mix(th.backdrop, th.hover, 0.85)) }
 	glyph(a, a.style.icon_small, plus, .Plus, th.sub)
 	add_hit(a, plus, .Tab_New, pi)
+	// Search the whole disk (Ctrl+Shift+F).
+	find := tx.Rect{plus.x + TAB_PILL_H + 2, y, TAB_PILL_H, TAB_PILL_H}
+	if hovered(a, .Search_Tab, pi) { fill_rounded(cv, find, f32(find.h) / 2, mix(th.backdrop, th.hover, 0.85)) }
+	glyph(a, a.style.icon_small, find, .Search, th.sub)
+	add_hit(a, find, .Search_Tab, pi)
 }
 
 // ---------------------------------------------------------------------------
@@ -473,11 +486,76 @@ layout_crumbs :: proc(a: ^App, dir: string, avail: i32) -> [dynamic]Crumb {
 	return out
 }
 
+// The grid/list switch ending at `right`; returns its left edge.
+@(private)
+draw_view_switch :: proc(a: ^App, cv: ^tx.Canvas, pi: int, t: ^Tab, right, cy, ph: i32) -> i32 {
+	th := &a.style.theme
+	seg_w := ph + 6
+	seg := tx.Rect{right - 2 * seg_w - 4, cy, 2 * seg_w + 4, ph}
+	fill_rounded(cv, seg, f32(ph) / 2, th.field)
+	for i in 0 ..< 2 {
+		r := tx.Rect{seg.x + 2 + i32(i) * seg_w, cy + 2, seg_w, ph - 4}
+		action := i == 0 ? Action.View_Grid : Action.View_List
+		sel := (i == 0) == (t.mode == .Grid)
+		if sel {
+			fill_rounded(cv, r, f32(r.h) / 2, th.accent)
+		} else if hovered(a, action, pi) {
+			fill_rounded(cv, r, f32(r.h) / 2, th.hover)
+		}
+		glyph(a, a.style.icon_small, r, i == 0 ? .Grid : .List, sel ? th.accent_fg : th.fg)
+		add_hit(a, r, action, pi)
+	}
+	return seg.x
+}
+
+// A search tab's bar: the query field (the whole width), Reindexar, the
+// view switch and the hidden-files toggle.
+@(private)
+draw_search_toolbar :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
+	th := &a.style.theme
+	t := pane_tab(a, pi)
+	p := a.panes[pi]
+	tb := L.toolbar
+	ph := a.style.pill_h
+	cy := tb.y + (tb.h - ph) / 2
+	pad := max(6, (tb.h - ph) / 2 + 2)
+	x := tb.x + pad
+	right := tb.x + tb.w - pad
+	icon_button(a, cv, {right - ph, cy, ph, ph}, t.show_hidden ? .Eye : .Eye_Off, .Hidden, pi, true, t.show_hidden)
+	right -= ph + 8
+	if tb.w >= 470 { right = draw_view_switch(a, cv, pi, t, right, cy, ph) - 10 }
+	indexing, _ := search_indexing(a)
+	icon_button(a, cv, {right - ph, cy, ph, ph}, indexing ? .Hourglass : .Refresh, .Reindex, pi, !indexing)
+	right -= ph + 8
+	area := tx.Rect{x, cy, right - x, ph}
+	if area.w < 60 { return }
+	if a.focus == .Path && pi == a.active_pane {
+		draw_field(a, cv, area, 0, 0, &p.path_field, "", true, .Folder_Open, .Path_Field, pi)
+		return
+	}
+	info := search_index_info(a)
+	placeholder := tr(a, "Buscar em todo o disco", "Search the whole disk")
+	if info.ready {
+		placeholder = fmt.tprintf(tr(a, "Buscar em todo o disco (%s itens)", "Search the whole disk (%s items)"), format_count(a, info.count))
+	}
+	draw_field(a, cv, area, 0, 0, &t.search, placeholder, a.focus == .Search && pi == a.active_pane, .Search, .Search, pi)
+	if field_text(&t.search) != "" {
+		xr := tx.Rect{area.x + area.w - ph + 2, cy + 2, ph - 4, ph - 4}
+		if hovered(a, .Clear_Search, pi) { fill_rounded(cv, xr, f32(xr.h) / 2, th.hover) }
+		glyph(a, a.style.icon_small, xr, .X, th.sub)
+		add_hit(a, xr, .Clear_Search, pi)
+	}
+}
+
 @(private)
 draw_toolbar :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 	th := &a.style.theme
 	t := pane_tab(a, pi)
 	p := a.panes[pi]
+	if is_search(t) {
+		draw_search_toolbar(a, cv, pi, L)
+		return
+	}
 	tb := L.toolbar
 	ph := a.style.pill_h
 	cy := tb.y + (tb.h - ph) / 2
@@ -497,24 +575,7 @@ draw_toolbar :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 	// Narrow panes drop the view switch, then the search field (keys still work).
 	show_seg := tb.w >= 470
 	show_search := tb.w >= 330 || (a.focus == .Search && pi == a.active_pane)
-	if show_seg {
-		seg_w := ph + 6
-		seg := tx.Rect{right - 2 * seg_w - 4, cy, 2 * seg_w + 4, ph}
-		fill_rounded(cv, seg, f32(ph) / 2, th.field)
-		for i in 0 ..< 2 {
-			r := tx.Rect{seg.x + 2 + i32(i) * seg_w, cy + 2, seg_w, ph - 4}
-			action := i == 0 ? Action.View_Grid : Action.View_List
-			sel := (i == 0) == (t.mode == .Grid)
-			if sel {
-				fill_rounded(cv, r, f32(r.h) / 2, th.accent)
-			} else if hovered(a, action, pi) {
-				fill_rounded(cv, r, f32(r.h) / 2, th.hover)
-			}
-			glyph(a, a.style.icon_small, r, i == 0 ? .Grid : .List, sel ? th.accent_fg : th.fg)
-			add_hit(a, r, action, pi)
-		}
-		right = seg.x - 10
-	}
+	if show_seg { right = draw_view_switch(a, cv, pi, t, right, cy, ph) - 10 }
 	if show_search {
 		sw := clamp(tb.w / 4, 110, 250)
 		sr := tx.Rect{right - sw, cy, sw, ph}
@@ -584,7 +645,7 @@ draw_content :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 		draw_viewer_header(a, cv, pi, L) // the file itself is drawn by mpv in its window
 		return
 	}
-	if t.mode == .List { draw_list_header(a, cv, L) }
+	if t.mode == .List { draw_list_header(a, cv, pi, L) }
 	drop_here := a.drag.drop.kind == .Pane && a.drag.drop.pane == pi
 	if drop_here { stroke_rounded(cv, L.card, f32(a.style.radius), 2, th.accent) }
 	if len(t.view) == 0 {
@@ -638,7 +699,9 @@ draw_empty_state :: proc(a: ^App, cv: ^tx.Canvas, t: ^Tab, L: ^Layout) {
 	ic := Ic.Folder_Open
 	title := tr(a, "Pasta vazia", "Empty folder")
 	sub := ""
-	if filter := field_text(&t.search); filter != "" {
+	if is_search(t) {
+		ic, title, sub = search_empty_state(a, t)
+	} else if filter := field_text(&t.search); filter != "" {
 		ic = .Search
 		title = tr(a, "Nada encontrado", "Nothing found")
 		sub = fmt.tprintf(tr(a, "Nenhum item corresponde a “%s”.", "No item matches “%s”."), filter)
@@ -657,18 +720,64 @@ draw_empty_state :: proc(a: ^App, cv: ^tx.Canvas, t: ^Tab, L: ^Layout) {
 }
 
 @(private)
-draw_list_header :: proc(a: ^App, cv: ^tx.Canvas, L: ^Layout) {
+draw_list_header :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 	th := &a.style.theme
 	hr := L.header
 	f := a.style.font_tiny
 	name_x := hr.x + 12 + LIST_ICON + 10
-	text_box(a, f, name_x, hr.y, hr.h, tr(a, "Nome", "Name"), th.sub, hr)
-	size_label := tr(a, "Tamanho", "Size")
-	text_box(a, f, L.area.x + L.col_size - tw(a, f, size_label), hr.y, hr.h, size_label, th.sub, hr)
-	if L.col_date < L.area.w {
-		text_box(a, f, L.area.x + L.col_date, hr.y, hr.h, tr(a, "Modificado", "Modified"), th.sub, hr)
+	if t := pane_tab(a, pi); is_search(t) {
+		draw_search_header(a, cv, pi, t, L)
+	} else {
+		text_box(a, f, name_x, hr.y, hr.h, tr(a, "Nome", "Name"), th.sub, hr)
+		size_label := tr(a, "Tamanho", "Size")
+		text_box(a, f, L.area.x + L.col_size - tw(a, f, size_label), hr.y, hr.h, size_label, th.sub, hr)
+		if L.col_date < L.area.w {
+			text_box(a, f, L.area.x + L.col_date, hr.y, hr.h, tr(a, "Modificado", "Modified"), th.sub, hr)
+		}
 	}
 	tx.canvas_fill_rect(cv, {hr.x + 8, hr.y + hr.h, hr.w - 16, 1}, mix(th.bg, th.muted, 0.18))
+}
+
+// A search tab's column titles: a click sorts by the column (again: the
+// other way round); the sorted one carries an arrow.
+@(private)
+draw_search_header :: proc(a: ^App, cv: ^tx.Canvas, pi: int, t: ^Tab, L: ^Layout) {
+	th := &a.style.theme
+	hr := L.header
+	f := a.style.font_tiny
+	ax := L.area.x
+	Column :: struct {
+		sort:   Search_Sort,
+		label:  string,
+		x0, x1: i32, // the clickable span
+		text_x: i32, // left edge of the title (right edge for right-aligned ones)
+		right:  bool,
+	}
+	cols := make([dynamic]Column, context.temp_allocator)
+	name_end := L.col_path < L.area.w ? L.col_path - 8 : L.col_size - 96
+	append(&cols, Column{.Name, tr(a, "Nome", "Name"), ax + 4, ax + name_end, ax + 12 + LIST_ICON + 10, false})
+	if L.col_path < L.area.w {
+		append(&cols, Column{.Path, tr(a, "Pasta", "Folder"), ax + L.col_path - 8, ax + L.col_size - 96, ax + L.col_path, false})
+	}
+	append(&cols, Column{.Size, tr(a, "Tamanho", "Size"), ax + L.col_size - 92, ax + L.col_size + 8, ax + L.col_size, true})
+	if L.col_date < L.area.w {
+		append(&cols, Column{.Date, tr(a, "Modificado", "Modified"), ax + L.col_date - 8, hr.x + hr.w - 4, ax + L.col_date, false})
+	}
+	arrow := t.find.desc ? Ic.Chevron_Down : Ic.Chevron_Up
+	for c in cols {
+		r := tx.Rect{c.x0, hr.y + 3, max(c.x1 - c.x0, 1), hr.h - 6}
+		active := t.find.sort == c.sort
+		if hovered(a, .Sort_Column, pi, int(c.sort)) { fill_rounded(cv, r, f32(r.h) / 2, th.hover) }
+		color := active ? th.fg : th.sub
+		lw := tw(a, f, c.label)
+		lx := c.right ? c.text_x - lw : c.text_x
+		text_box(a, f, lx, hr.y, hr.h, c.label, color, hr)
+		if active {
+			ax0 := c.right ? lx - 18 : lx + lw + 2
+			glyph(a, a.style.icon_small, {ax0, hr.y, 16, hr.h}, arrow, th.accent, hr)
+		}
+		add_hit(a, r, .Sort_Column, pi, int(c.sort))
+	}
 }
 
 // Item highlight: selection (tonal accent), hover (surface), keyboard cursor
@@ -740,8 +849,9 @@ glyph_local :: proc(a: ^App, f: ^tx.Font, box: tx.Rect, ic: Ic, color: tx.Color)
 
 draw_entry_icon :: proc(a: ^App, cv: ^tx.Canvas, dir: string, e: ^Entry, box: tx.Rect, size: Icon_Size, local := true) {
 	th := &a.style.theme
+	folder := e.dir != "" ? e.dir : dir // search results carry their folder
 	opacity: f32 = e.unreadable ? 0.45 : (e.hidden ? 0.7 : 1)
-	if img, ok := entry_thumb(a, dir, e, size); ok {
+	if img, ok := entry_thumb(a, folder, e, size); ok {
 		x := box.x + (box.w - img.w) / 2
 		y := box.y + (box.h - img.h) / 2
 		radius: f32 = size == .Grid ? 6 : 3
@@ -750,7 +860,7 @@ draw_entry_icon :: proc(a: ^App, cv: ^tx.Canvas, dir: string, e: ^Entry, box: tx
 		if opaque_corners(img) { stroke_rounded(cv, {x, y, img.w, img.h}, radius, 1, tx.color_with_alpha(th.fg, 28)) }
 		return
 	}
-	if img, ok := entry_icon(a, dir, e, size); ok {
+	if img, ok := entry_icon(a, folder, e, size); ok {
 		tx.canvas_blit_image(cv, img, box.x + (box.w - img.w) / 2, box.y + (box.h - img.h) / 2, opacity)
 		return
 	}
@@ -787,7 +897,7 @@ draw_grid_item :: proc(a: ^App, cv: ^tx.Canvas, pi: int, t: ^Tab, L: ^Layout, vi
 	max_w := r.w - 16
 	color := e.unreadable ? th.dim : th.fg
 	ox, oy := area.x, area.y
-	if a.focus == .Rename && pi == a.active_pane && a.rename_name == e.name {
+	if renaming(a, pi, t, vi, e) {
 		fr := tx.Rect{r.x + 6, label_y - 4, r.w - 12, lh + 8}
 		draw_field(a, cv, fr, ox, oy, &a.rename, "", true, .None, .Rename_Field, pi, area)
 	} else {
@@ -815,8 +925,10 @@ draw_list_item :: proc(a: ^App, cv: ^tx.Canvas, pi: int, t: ^Tab, L: ^Layout, vi
 	name_x := box.x + LIST_ICON + 10
 	name_w := L.col_size - 100 - name_x
 	if L.col_date >= L.area.w { name_w = L.col_size - 90 - name_x }
+	with_path := is_search(t) && L.col_path < L.area.w
+	if with_path { name_w = L.col_path - 16 - name_x }
 	color := e.unreadable ? th.dim : th.fg
-	if a.focus == .Rename && pi == a.active_pane && a.rename_name == e.name {
+	if renaming(a, pi, t, vi, e) {
 		fr := tx.Rect{name_x - 8, r.y + 2, max(name_w + 8, 120), r.h - 4}
 		draw_field(a, cv, fr, ox, oy, &a.rename, "", true, .None, .Rename_Field, pi, area)
 	} else {
@@ -824,12 +936,23 @@ draw_list_item :: proc(a: ^App, cv: ^tx.Canvas, pi: int, t: ^Tab, L: ^Layout, vi
 		text_box(a, a.style.font, ox + name_x, oy + r.y, r.h, name, color, area)
 	}
 	f := a.style.font_tiny
-	size := e.is_dir || e.kind == .Broken ? "—" : format_size(a, e.size)
+	if with_path {
+		folder := ellipsize_left(a, f, display_dir(e.dir), L.col_size - 100 - L.col_path)
+		text_box(a, f, ox + L.col_path, oy + r.y, r.h, folder, th.sub, area)
+	}
+	size := e.is_dir || e.kind == .Broken ? "—" : (e.pending ? "…" : format_size(a, e.size))
 	text_box(a, f, ox + L.col_size - tw(a, f, size), oy + r.y, r.h, size, th.sub, area)
-	if L.col_date < L.area.w {
+	if L.col_date < L.area.w && !e.pending {
 		text_box(a, f, ox + L.col_date, oy + r.y, r.h, format_date(a, e.mtime), th.sub, area)
 	}
 	add_hit(a, {ox + hl.x, oy + hl.y, hl.w, hl.h}, .Item, pi, vi, area)
+}
+
+// Is view item `vi` the one being renamed? (Search results can share names.)
+@(private)
+renaming :: proc(a: ^App, pi: int, t: ^Tab, vi: int, e: ^Entry) -> bool {
+	if a.focus != .Rename || pi != a.active_pane || a.rename_name != e.name { return false }
+	return !is_search(t) || t.view[vi] == a.rename_index
 }
 
 // Thin rounded thumb along the right edge (area coordinates).
@@ -866,6 +989,9 @@ draw_status :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 	f := a.style.font_tiny
 	x := st.x + 18
 	right := st.x + st.w - 18
+	s_left, s_right: string
+	s_indexing: bool
+	if is_search(t) { s_left, s_right, s_indexing = search_status(a, t) }
 	// Background jobs (copies, moves, archives): a turning arc and a label.
 	if len(a.jobs) > 0 && pi == len(a.panes) - 1 {
 		label := jobs_label(a)
@@ -874,6 +1000,14 @@ draw_status :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 		phase := f32(tx.now() * 1.2)
 		spinner(cv, f32(right - w - 14), f32(st.y + st.h / 2), 6, 2.2, phase - f32(i64(phase)), th.accent, tx.color_with_alpha(th.muted, 60))
 		right -= w + 30
+	} else if is_search(t) {
+		// The index: its age, or the walk going on.
+		if s_right != "" && st.w > 320 {
+			w := tw(a, f, s_right)
+			text_box(a, f, right - w, st.y, st.h, s_right, s_indexing ? th.fg : th.sub, st)
+			if s_indexing { glyph(a, a.style.icon_small, {right - w - 22, st.y, 18, st.h}, .Hourglass, th.accent, st) }
+			right -= w + (s_indexing ? 38 : 16)
+		}
 	} else if t.has_free && st.w > 320 {
 		free := fmt.tprintf(tr(a, "%s livres", "%s free"), format_size(a, t.free_bytes))
 		w := tw(a, f, free)
@@ -889,6 +1023,10 @@ draw_status :: proc(a: ^App, cv: ^tx.Canvas, pi: int, L: ^Layout) {
 		fill_rounded(cv, pill, f32(pill.h) / 2, mix(th.bg, color, th.dark ? 0.16 : 0.12))
 		glyph(a, a.style.icon_small, {pill.x + 6, pill.y, 20, pill.h}, ic, color)
 		text_box(a, f, pill.x + 30, pill.y, pill.h, label, th.fg)
+		return
+	}
+	if is_search(t) {
+		text_box(a, f, x, st.y, st.h, tx.text_ellipsize(a.c, f, s_left, avail), th.sub, st)
 		return
 	}
 	count, bytes, files := selection_stats(t)
@@ -951,12 +1089,12 @@ draw_drag_overlay :: proc(a: ^App, cv: ^tx.Canvas) {
 		// The tab itself under the pointer.
 		if d.pane >= 0 && d.pane < len(a.panes) && d.arg >= 0 && d.arg < len(a.panes[d.pane].tabs) {
 			t := a.panes[d.pane].tabs[d.arg]
-			label := tx.text_ellipsize(a.c, a.style.font_small, dir_label(a, t.dir), 150)
+			label := tx.text_ellipsize(a.c, a.style.font_small, tab_label(a, t), 150)
 			w := tw(a, a.style.font_small, label) + 46
 			r := tx.Rect{a.pointer.x - w / 2, a.pointer.y - TAB_PILL_H / 2, w, TAB_PILL_H}
 			soft_shadow(cv, r, f32(r.h) / 2, 8, th.dark ? 0.4 : 0.14, 2)
 			fill_rounded(cv, r, f32(r.h) / 2, th.accent)
-			glyph(a, a.style.icon_small, {r.x + 8, r.y, 20, r.h}, .Folder, th.accent_fg)
+			glyph(a, a.style.icon_small, {r.x + 8, r.y, 20, r.h}, tab_icon(t), th.accent_fg)
 			text_box(a, a.style.font_small, r.x + 32, r.y, r.h, label, th.accent_fg)
 		}
 	case .Files:

@@ -32,6 +32,7 @@ Ic :: enum {
 	Folder_Open, Folder_Plus, File, Photo, Music, Movie, Download, Trash, Desktop, File_Text, Copy, Cut,
 	Clipboard, Pencil, Terminal, External, X, Milk, Wallpaper, Link, Lock, Alert, Check, Apps, Clipboard_Copy,
 	Server, Info, Refresh, Folders, Hourglass, Plus, Archive, Unarchive, Folder_Down, Columns, App_Window,
+	Chevron_Down, Chevron_Up, Folder_Search,
 }
 
 @(rodata)
@@ -45,6 +46,7 @@ IC_CODES := [Ic]rune{
 	.Lock = 0xEAE2, .Alert = 0xEA06, .Check = 0xEA5E, .Apps = 0xEBB6, .Clipboard_Copy = 0xF299,
 	.Server = 0xEB1F, .Info = 0xEAC5, .Refresh = 0xEB13, .Folders = 0xEAAE, .Hourglass = 0xEF93, .Plus = 0xEB0B,
 	.Archive = 0xEA0B, .Unarchive = 0xF07A, .Folder_Down = 0xF912, .Columns = 0xEAD4, .App_Window = 0xEFE6,
+	.Chevron_Down = 0xEA5F, .Chevron_Up = 0xEA62, .Folder_Search = 0xF918,
 }
 
 Style :: struct {
@@ -66,9 +68,16 @@ Style :: struct {
 
 tr :: proc(a: ^App, pt, en: string) -> string { return a.pt ? pt : en }
 
-// milk.json: $MILK_CONFIG, else ../milk/milk.json next to Spoil's folder.
+// milk.json: $MILK_CONFIG (set by milk), else ~/.config/milk/milk.json, else
+// ../milk/milk.json next to Spoil's folder (where milk kept it before).
 find_config :: proc() -> string {
 	if v, found := os.lookup_env("MILK_CONFIG", context.temp_allocator); found && v != "" { return strings.clone(v) }
+	config_home, has := os.lookup_env("XDG_CONFIG_HOME", context.temp_allocator)
+	if !has || config_home == "" {
+		home, _ := os.lookup_env("HOME", context.temp_allocator)
+		config_home, _ = filepath.join({home, ".config"}, context.temp_allocator)
+	}
+	if p, _ := filepath.join({config_home, "milk", "milk.json"}, context.temp_allocator); os.is_file(p) { return strings.clone(p) }
 	if dir, err := os.get_executable_directory(context.temp_allocator); err == nil {
 		// bin/spoil → ../../milk/milk.json; a binary in spoil/ itself → ../milk/milk.json.
 		for rel in ([]string{"../../milk/milk.json", "../milk/milk.json"}) {
@@ -169,7 +178,7 @@ apply_style :: proc(a: ^App) {
 	s.radius = i32(clamp(b.radius, 6, 22))
 	s.pill_h = min(s.bar_h - 8, max(s.icon_size + 9, s.font_size + 14))
 	s.anim_scale = a.cfg != nil ? clamp(a.cfg.appearance.animation_scale, 0, 3) : 0.7
-	a.pt = strings.has_prefix(strings.to_lower(b.locale, context.temp_allocator), "pt")
+	a.pt = b.language == .Portuguese // bar.locale, "auto" = the system language
 
 	open :: proc(c: ^tx.Connection, family, style: string, px: i32) -> ^tx.Font {
 		pattern := style == "" ? family : strings.concatenate({family, ":", style}, context.temp_allocator)
@@ -224,6 +233,8 @@ ic_fallback :: proc(ic: Ic) -> string {
 	case .Arrow_Right:   return "→"
 	case .Arrow_Up:      return "↑"
 	case .Chevron_Right: return "›"
+	case .Chevron_Down:  return "▾"
+	case .Chevron_Up:    return "▴"
 	case .Search:        return "⌕"
 	case .Grid:          return "▦"
 	case .List:          return "☰"

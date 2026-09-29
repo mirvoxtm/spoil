@@ -71,10 +71,11 @@ begin_file_drag :: proc(a: ^App) {
 	if !pressed.selected { select_only(a, t, d.arg) }
 	for p in selected_paths(t) { append(&d.paths, strings.clone(p)) }
 	if len(d.paths) == 0 { return }
-	d.src_dir = strings.clone(t.dir)
+	d.src_dir = strings.clone(is_search(t) ? "" : t.dir) // search results come from anywhere
 	d.ghost = pressed^
 	d.ghost.name = strings.clone(pressed.name)
 	d.ghost.key = strings.clone(pressed.key)
+	d.ghost.dir = strings.clone(pressed.dir)
 	d.ghost_ok = true
 	d.kind = .Files
 	d.defer_select = false
@@ -122,23 +123,30 @@ file_drop_target :: proc(a: ^App, x, y: i32) -> Drop {
 		t := pane_tab(a, h.pane)
 		if h.arg < len(t.view) {
 			e := &t.entries[t.view[h.arg]]
-			path := join({t.dir, e.name})
+			path := entry_path(t, e)
 			if e.is_dir && !e.unreadable && !is_dragged(a, path) { return {.Folder, h.pane, h.arg} }
 		}
-		if pane_tab(a, h.pane).dir != d.src_dir { return {.Pane, h.pane, 0} }
+		if droppable_pane(a, h.pane) { return {.Pane, h.pane, 0} }
 	case .Empty, .Pane, .Scrollbar, .Search, .Crumb_Bar, .Back, .Forward, .Up, .View_Grid, .View_List, .Hidden, .Path_Field:
-		if pane_tab(a, h.pane).dir != d.src_dir { return {.Pane, h.pane, 0} }
+		if droppable_pane(a, h.pane) { return {.Pane, h.pane, 0} }
 	case .Place:
 		places := build_places(a)
 		if h.arg < len(places) && places[h.arg].path != d.src_dir && !is_dragged(a, places[h.arg].path) { return {.Place, 0, h.arg} }
 	case .Tab, .Tab_Close:
 		p := a.panes[h.pane]
-		if h.arg < len(p.tabs) && p.tabs[h.arg].dir != d.src_dir { return {.Tab, h.pane, h.arg} }
+		if h.arg < len(p.tabs) && p.tabs[h.arg].dir != d.src_dir && !is_search(p.tabs[h.arg]) { return {.Tab, h.pane, h.arg} }
 	case .Crumb:
 		list := a.crumbs[h.pane]
 		if h.arg < len(list) && list[h.arg] != d.src_dir && !is_dragged(a, list[h.arg]) { return {.Crumb, h.pane, h.arg} }
 	}
 	return {}
+}
+
+// Files can be dropped on a pane showing another folder (not on search results).
+@(private)
+droppable_pane :: proc(a: ^App, pi: int) -> bool {
+	t := pane_tab(a, pi)
+	return !is_search(t) && t.dir != a.drag.src_dir
 }
 
 @(private)
@@ -159,7 +167,7 @@ drop_dir :: proc(a: ^App) -> string {
 		if d.drop.pane >= len(a.panes) { return "" }
 		t := pane_tab(a, d.drop.pane)
 		if d.drop.arg >= len(t.view) { return "" }
-		return join({t.dir, t.entries[t.view[d.drop.arg]].name})
+		return entry_path(t, &t.entries[t.view[d.drop.arg]])
 	case .Pane:
 		if d.drop.pane >= len(a.panes) { return "" }
 		return pane_tab(a, d.drop.pane).dir

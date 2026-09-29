@@ -1,7 +1,8 @@
 // Tabs and panes. The window holds up to four panes side by side (tiling
 // style, like milk's window manager); each pane has its own tab strip, path
 // bar and file view, and each tab its own folder, history, selection,
-// scroll, view mode, hidden-files switch and search.
+// scroll, view mode, hidden-files switch and search. A search tab
+// (search.odin) lists results from anywhere on the disk instead of a folder.
 package spoil
 
 import "core:fmt"
@@ -12,7 +13,12 @@ import "core:sys/posix"
 
 MAX_PANES :: 4
 
+Tab_Kind :: enum { Folder, Search }
+
 Tab :: struct {
+	kind:        Tab_Kind,
+	id:          int,
+	find:        Search_Tab, // search tabs: the query's state (the query is `search`)
 	dir:         string, // owned
 	dir_mtime:   i64,
 	entries:     [dynamic]Entry, // sorted
@@ -27,7 +33,7 @@ Tab :: struct {
 	anchor:      int, // shift-selection anchor
 	scroll:      f32,
 	scroll_to:   f32,
-	search:      Field,
+	search:      Field,   // the folder filter; a search tab's query
 }
 
 Pane :: struct {
@@ -38,8 +44,13 @@ Pane :: struct {
 	viewer:     Embed,   // a picture/video shown inside the pane (embed.odin)
 }
 
+@(private="file")
+g_tab_ids: int
+
 tab_create :: proc(mode: View_Mode, show_hidden: bool) -> ^Tab {
 	t := new(Tab)
+	g_tab_ids += 1
+	t.id = g_tab_ids
 	t.cursor, t.anchor = -1, -1
 	t.mode = mode
 	t.show_hidden = show_hidden
@@ -84,6 +95,27 @@ pane_tab :: proc(a: ^App, pi: int) -> ^Tab {
 	return p.tabs[p.active]
 }
 
+is_search :: #force_inline proc(t: ^Tab) -> bool { return t.kind == .Search }
+
+// The folder holding entry `e` (search results each have their own).
+entry_dir :: proc(t: ^Tab, e: ^Entry) -> string { return e.dir != "" ? e.dir : t.dir }
+
+entry_path :: proc(t: ^Tab, e: ^Entry) -> string { return join({entry_dir(t, e), e.name}) }
+
+// The tab's title: its folder, or a search tab's query.
+tab_label :: proc(a: ^App, t: ^Tab) -> string {
+	if is_search(t) {
+		q := strings.trim_space(field_text(&t.search))
+		return q == "" ? tr(a, "Busca", "Search") : q
+	}
+	return dir_label(a, t.dir)
+}
+
+tab_icon :: proc(t: ^Tab) -> Ic {
+	if is_search(t) { return .Search }
+	return t.dir == clean_path(home_dir()) ? .Home : .Folder
+}
+
 // ---------------------------------------------------------------------------
 // Tab and pane management
 // ---------------------------------------------------------------------------
@@ -118,6 +150,18 @@ set_active_tab :: proc(a: ^App, pi, ti: int) {
 
 // A tab shown again: pick up changes made while it was hidden.
 tab_came_back :: proc(a: ^App, t: ^Tab) {
+	if is_search(t) {
+		// Results whose sizes were left unknown (another search ran meanwhile).
+		if !t.find.busy {
+			for e in t.entries {
+				if e.pending {
+					search_refresh(a, t)
+					break
+				}
+			}
+		}
+		return
+	}
 	if mt, ok := mtime_of(t.dir); !ok || mt != t.dir_mtime { refresh(a, t) }
 }
 
@@ -271,6 +315,7 @@ errno_text :: proc(a: ^App, err: posix.Errno) -> string {
 
 // Open folder `path` in tab `t`. On failure (permissions, missing) the tab
 // stays where it was and a notice explains why. `select_name` is selected.
+// A search tab becomes a folder tab.
 navigate :: proc(a: ^App, t: ^Tab, path: string, push := true, select_name := "") -> bool {
 	base := t.dir != "" ? t.dir : home_dir()
 	target := absolute_path(path, base)
@@ -283,7 +328,7 @@ navigate :: proc(a: ^App, t: ^Tab, path: string, push := true, select_name := ""
 	}
 	slice.sort_by(list[:], entry_less)
 	if t == cur_tab_or_nil(a) && a.focus == .Rename { rename_finish(a) }
-	if push && t.dir != "" && t.dir != target {
+	if push && t.dir != "" && t.dir != target && !is_search(t) {
 		append(&t.back_stack, strings.clone(t.dir))
 		for s in t.fwd_stack { delete(s) }
 		clear(&t.fwd_stack)
@@ -291,6 +336,8 @@ navigate :: proc(a: ^App, t: ^Tab, path: string, push := true, select_name := ""
 	entries_clear(&t.entries)
 	delete(t.entries)
 	t.entries = list
+	t.kind = .Folder
+	t.find = {}
 	delete(t.dir)
 	t.dir = strings.clone(target)
 	t.dir_mtime, _ = mtime_of(target)
@@ -317,7 +364,7 @@ cur_tab_or_nil :: proc(a: ^App) -> ^Tab {
 }
 
 go_up :: proc(a: ^App, t: ^Tab) {
-	if t.dir == "/" { return }
+	if t.dir == "/" || is_search(t) { return }
 	child := base_name(t.dir)
 	navigate(a, t, parent_dir(t.dir), true, child)
 }
@@ -346,6 +393,10 @@ go_forward :: proc(a: ^App, t: ^Tab) {
 
 // Re-read the folder, keeping the selection, the cursor and the scroll.
 refresh :: proc(a: ^App, t: ^Tab) {
+	if is_search(t) {
+		search_refresh(a, t)
+		return
+	}
 	selected := make(map[string]bool, context.temp_allocator)
 	for e in t.entries { if e.selected { selected[strings.clone(e.name, context.temp_allocator)] = true } }
 	cursor_name := ""
@@ -387,7 +438,7 @@ refresh_visible :: proc(a: ^App) {
 check_directories :: proc(a: ^App) {
 	for p in a.panes {
 		t := p.tabs[p.active]
-		if t.dir == "" { continue }
+		if t.dir == "" || is_search(t) { continue }
 		mt, ok := mtime_of(t.dir)
 		if !ok || mt != t.dir_mtime { refresh(a, t) }
 	}
@@ -397,14 +448,15 @@ update_free :: proc(t: ^Tab) {
 	t.free_bytes, t.has_free = free_space(t.dir)
 }
 
-// The filtered, visible entries (entries are kept sorted).
+// The filtered, visible entries (entries are kept sorted). Search results
+// are filtered by the search itself; only those gone from the disk drop out.
 rebuild_view :: proc(a: ^App, t: ^Tab) {
 	cursor_entry := -1
 	if t.cursor >= 0 && t.cursor < len(t.view) { cursor_entry = t.view[t.cursor] }
 	clear(&t.view)
-	needle := sort_key(strings.trim_space(field_text(&t.search)), context.temp_allocator)
+	needle := is_search(t) ? "" : sort_key(strings.trim_space(field_text(&t.search)), context.temp_allocator)
 	for &e, i in t.entries {
-		visible := (t.show_hidden || !e.hidden) && matches_filter(e.key, needle)
+		visible := is_search(t) ? !e.gone : (t.show_hidden || !e.hidden) && matches_filter(e.key, needle)
 		if !visible {
 			e.selected = false
 			continue
@@ -421,6 +473,7 @@ rebuild_view :: proc(a: ^App, t: ^Tab) {
 }
 
 hidden_count :: proc(t: ^Tab) -> int {
+	if is_search(t) { return t.find.hidden }
 	n := 0
 	for e in t.entries { if e.hidden { n += 1 } }
 	return n
@@ -437,7 +490,7 @@ selected_entries :: proc(t: ^Tab) -> []int {
 
 selected_paths :: proc(t: ^Tab) -> []string {
 	out := make([dynamic]string, context.temp_allocator)
-	for idx in selected_entries(t) { append(&out, join({t.dir, t.entries[idx].name})) }
+	for idx in selected_entries(t) { append(&out, entry_path(t, &t.entries[idx])) }
 	return out[:]
 }
 
@@ -543,6 +596,12 @@ set_mode :: proc(a: ^App, t: ^Tab, m: View_Mode) {
 
 toggle_hidden :: proc(a: ^App, t: ^Tab) {
 	t.show_hidden = !t.show_hidden
-	rebuild_view(a, t)
+	if is_search(t) { search_refresh(a, t) } else { rebuild_view(a, t) }
 	set_notice(a, t.show_hidden ? tr(a, "Mostrando arquivos ocultos", "Showing hidden files") : tr(a, "Arquivos ocultos escondidos", "Hidden files hidden"))
+}
+
+// The filter (or a search tab's query) was edited.
+filter_changed :: proc(a: ^App, t: ^Tab) {
+	if is_search(t) { search_submit(a, t) } else { rebuild_view(a, t) }
+	a.dirty = true
 }

@@ -18,6 +18,7 @@ MENU_DIV_H  :: 9
 Command :: enum {
 	None, Open, Rename, Copy, Cut, Paste, Trash, Copy_Path, Terminal, Wallpaper, New_Folder, Select_All, Hidden,
 	Compress, Extract_Here, Extract_Folder, New_Tab, New_Pane, Close_Tab, Close_Other_Tabs, Tab_To_Pane,
+	Open_Folder, Search, Reindex,
 }
 
 Menu_Item :: struct {
@@ -64,17 +65,23 @@ menu_open :: proc(a: ^App, x_root, y_root: i32, on_item: bool) {
 	m.hover = -1
 	m.area = current_area(a)
 	t := cur_tab(a)
-	can_paste := len(a.clip.paths) > 0
+	search := is_search(t)
+	can_paste := len(a.clip.paths) > 0 && !search
 	can_split := len(a.panes) < MAX_PANES
 	sel := selected_entries(t)
 	if on_item && len(sel) > 0 {
 		single := len(sel) == 1
 		e := &t.entries[sel[0]]
 		all_archives := true
+		same_dir := true // search results can come from many folders
 		for idx in sel {
 			if t.entries[idx].is_dir || archive_suffix(t.entries[idx].name) == "" { all_archives = false }
+			if entry_dir(t, &t.entries[idx]) != entry_dir(t, e) { same_dir = false }
 		}
 		menu_add(m, .Open, tr(a, "Abrir", "Open"), e.is_dir && single ? .Folder_Open : .External, "Enter")
+		if search {
+			menu_add(m, .Open_Folder, tr(a, "Abrir pasta que contém", "Open containing folder"), .Folder_Search, "Ctrl+Enter")
+		}
 		if single && e.is_dir {
 			menu_add(m, .New_Tab, tr(a, "Abrir em nova aba", "Open in new tab"), .App_Window, tr(a, "Botão do meio", "Middle click"))
 			menu_add(m, .New_Pane, tr(a, "Abrir em novo painel", "Open in new pane"), .Columns, "", can_split)
@@ -83,11 +90,11 @@ menu_open :: proc(a: ^App, x_root, y_root: i32, on_item: bool) {
 		m.pending_divider = true
 		menu_add(m, .Cut, tr(a, "Recortar", "Cut"), .Cut, "Ctrl+X")
 		menu_add(m, .Copy, tr(a, "Copiar", "Copy"), .Copy, "Ctrl+C")
-		menu_add(m, .Paste, tr(a, "Colar", "Paste"), .Clipboard, "Ctrl+V", can_paste)
+		if !search { menu_add(m, .Paste, tr(a, "Colar", "Paste"), .Clipboard, "Ctrl+V", can_paste) }
 		menu_add(m, .Rename, tr(a, "Renomear", "Rename"), .Pencil, "F2", single)
 		menu_add(m, .Copy_Path, tr(a, "Copiar caminho", "Copy path"), .Clipboard_Copy)
 		m.pending_divider = true
-		menu_add(m, .Compress, tr(a, "Comprimir…", "Compress…"), .Archive, "", format_available(.Zip) || format_available(.Seven_Z))
+		menu_add(m, .Compress, tr(a, "Comprimir…", "Compress…"), .Archive, "", same_dir && (format_available(.Zip) || format_available(.Seven_Z)))
 		if all_archives {
 			menu_add(m, .Extract_Here, tr(a, "Extrair aqui", "Extract here"), .Unarchive)
 			menu_add(m, .Extract_Folder, tr(a, "Extrair para pasta", "Extract to folder"), .Folder_Down)
@@ -98,6 +105,14 @@ menu_open :: proc(a: ^App, x_root, y_root: i32, on_item: bool) {
 		}
 		m.pending_divider = true
 		menu_add(m, .Trash, tr(a, "Mover para a lixeira", "Move to trash"), .Trash, "Delete", g_tools.gio, true)
+	} else if search {
+		indexing, _ := search_indexing(a)
+		menu_add(m, .Reindex, tr(a, "Reindexar o disco", "Reindex the disk"), .Refresh, "", !indexing)
+		menu_add(m, .Select_All, tr(a, "Selecionar tudo", "Select all"), .Check, "Ctrl+A", len(t.view) > 0)
+		menu_add(m, .Hidden, t.show_hidden ? tr(a, "Esconder arquivos ocultos", "Hide hidden files") : tr(a, "Mostrar arquivos ocultos", "Show hidden files"),
+		         t.show_hidden ? .Eye_Off : .Eye, "Ctrl+H")
+		m.pending_divider = true
+		menu_add(m, .New_Tab, tr(a, "Nova aba", "New tab"), .App_Window, "Ctrl+T")
 	} else {
 		menu_add(m, .New_Folder, tr(a, "Nova pasta", "New folder"), .Folder_Plus, "Ctrl+Shift+N")
 		menu_add(m, .Paste, tr(a, "Colar", "Paste"), .Clipboard, "Ctrl+V", can_paste)
@@ -106,6 +121,7 @@ menu_open :: proc(a: ^App, x_root, y_root: i32, on_item: bool) {
 		menu_add(m, .New_Pane, tr(a, "Dividir painel", "Split pane"), .Columns, "Ctrl+\\", can_split)
 		menu_add(m, .Terminal, tr(a, "Abrir terminal aqui", "Open terminal here"), .Terminal)
 		menu_add(m, .Copy_Path, tr(a, "Copiar caminho", "Copy path"), .Clipboard_Copy)
+		menu_add(m, .Search, tr(a, "Buscar em todo o disco", "Search the whole disk"), .Folder_Search, "Ctrl+Shift+F")
 		m.pending_divider = true
 		menu_add(m, .Select_All, tr(a, "Selecionar tudo", "Select all"), .Check, "Ctrl+A", len(t.view) > 0)
 		menu_add(m, .Hidden, t.show_hidden ? tr(a, "Esconder arquivos ocultos", "Hide hidden files") : tr(a, "Mostrar arquivos ocultos", "Show hidden files"),

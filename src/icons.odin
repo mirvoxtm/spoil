@@ -373,19 +373,23 @@ thumbs_forget :: proc(a: ^App) {
 		delete(job.path, heap)
 	}
 	delete(jobs)
-	prefixes := make([dynamic]string, context.temp_allocator)
+	// Kept: the thumbnails of files in a folder some tab shows (search tabs
+	// show many folders).
+	dirs := make(map[string]bool, 16, context.temp_allocator)
 	for p in a.panes {
 		for tab in p.tabs {
-			if tab.dir == "" { continue }
-			append(&prefixes, tab.dir == "/" ? "/" : strings.concatenate({tab.dir, "/"}, context.temp_allocator))
+			if tab.dir != "" && !is_search(tab) { dirs[tab.dir] = true }
+			if is_search(tab) { for e in tab.entries { dirs[e.dir] = true } }
 		}
 	}
 	stale := make([dynamic]string, context.temp_allocator)
-	outer: for k in t.items {
-		for prefix in prefixes {
-			if strings.has_prefix(k, prefix) && strings.index_byte(k[len(prefix):], '/') < 0 { continue outer }
+	for k in t.items {
+		path := k // "<path>|<mtime>|<size>"
+		for _ in 0 ..< 2 {
+			if bar := strings.last_index_byte(path, '|'); bar >= 0 { path = path[:bar] }
 		}
-		append(&stale, k)
+		slash := strings.last_index_byte(path, '/')
+		if (slash <= 0 ? "/" : path[:slash]) not_in dirs { append(&stale, k) }
 	}
 	for k in stale {
 		key, th := delete_key(&t.items, k)

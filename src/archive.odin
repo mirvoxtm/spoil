@@ -161,12 +161,20 @@ card_open_compress :: proc(a: ^App) {
 	t := cur_tab(a)
 	sel := selected_entries(t)
 	if len(sel) == 0 { return }
+	// Search results: only items of one folder go into an archive.
+	dir := entry_dir(t, &t.entries[sel[0]])
+	for idx in sel {
+		if entry_dir(t, &t.entries[idx]) != dir {
+			set_notice(a, tr(a, "Escolha itens de uma mesma pasta para comprimir", "Pick items of one folder to compress"), true)
+			return
+		}
+	}
 	card_close(a)
 	cd := &a.card
 	for idx in sel { append(&cd.names, strings.clone(t.entries[idx].name)) }
-	cd.dir = strings.clone(t.dir)
+	cd.dir = strings.clone(dir)
 	// Default name: the item (without its extension) or the folder.
-	default_name := dir_label(a, t.dir)
+	default_name := dir_label(a, dir)
 	if len(sel) == 1 {
 		e := &t.entries[sel[0]]
 		default_name = e.name
@@ -178,7 +186,7 @@ card_open_compress :: proc(a: ^App) {
 			}
 		}
 	}
-	if t.dir == "/" && len(sel) > 1 { default_name = tr(a, "Arquivos", "Archive") }
+	if dir == "/" && len(sel) > 1 { default_name = tr(a, "Arquivos", "Archive") }
 	field_set(&cd.name, default_name)
 	field_select_all(&cd.name)
 	if !format_available(cd.format) {

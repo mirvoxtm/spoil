@@ -127,6 +127,9 @@ on_button_press :: proc(a: ^App, ev: ^xlib.XButtonEvent) {
 
 	switch h.action {
 	case .None, .Pane, .Tab_Strip, .Card_Field, .Card_Format, .Card_Cancel, .Card_Ok:
+	case .Search_Tab:  search_open(a)
+	case .Sort_Column: search_sort_by(a, t, Search_Sort(h.arg))
+	case .Reindex:     search_reindex(a)
 	case .Viewer_Prev:     viewer_step(a, pi, -1)
 	case .Viewer_Next:     viewer_step(a, pi, 1)
 	case .Viewer_Close:    viewer_close(a, pi)
@@ -158,7 +161,7 @@ on_button_press :: proc(a: ^App, ev: ^xlib.XButtonEvent) {
 		field_click(a, &t.search, x, a.style.font)
 	case .Clear_Search:
 		field_clear(&t.search)
-		rebuild_view(a, t)
+		filter_changed(a, t)
 		a.focus = .Search
 	case .Path_Field:
 		field_click(a, &cur_pane(a).path_field, x, a.style.font)
@@ -236,7 +239,7 @@ middle_click :: proc(a: ^App, h: Hit) {
 		t := pane_tab(a, h.pane)
 		e := &t.entries[t.view[h.arg]]
 		if e.is_dir {
-			if new_tab(a, h.pane, join({t.dir, e.name}), false) {
+			if new_tab(a, h.pane, entry_path(t, e), false) {
 				set_notice(a, fmt.tprintf(tr(a, "“%s” aberta em uma nova aba", "“%s” opened in a new tab"), e.name))
 			}
 		}
@@ -247,6 +250,9 @@ middle_click :: proc(a: ^App, h: Hit) {
 		if h.arg < len(places) { new_tab(a, a.active_pane, places[h.arg].path) }
 	case .Tab_Strip, .Tab_New:
 		new_tab(a, h.pane, pane_tab(a, h.pane).dir)
+	case .Search_Tab:
+		set_active_pane(a, h.pane)
+		search_open(a)
 	}
 }
 
@@ -340,6 +346,12 @@ key_global :: proc(a: ^App, ks: uint, shift, alt: bool) -> bool {
 	case 't', 'T':
 		new_tab(a, a.active_pane, cur_tab(a).dir)
 		return true
+	case 'f', 'F':
+		// Ctrl+Shift+F: search the whole disk (starting from the folder filter).
+		if !shift { return false }
+		t := cur_tab(a)
+		search_open(a, is_search(t) ? "" : strings.trim_space(field_text(&t.search)))
+		return true
 	case 'w', 'W':
 		if shift {
 			if len(a.panes) > 1 { close_pane(a, a.active_pane) } else { a.running = false }
@@ -376,7 +388,7 @@ key_search :: proc(a: ^App, ks: uint, text: string, ctrl, shift: bool) -> bool {
 	case KS_ESCAPE:
 		if field_text(&t.search) != "" {
 			field_clear(&t.search)
-			rebuild_view(a, t)
+			filter_changed(a, t)
 		} else {
 			a.focus = .View
 		}
@@ -398,9 +410,11 @@ key_search :: proc(a: ^App, ks: uint, text: string, ctrl, shift: bool) -> bool {
 		start_path_edit(a)
 		return true
 	}
+	before := strings.clone(field_text(&t.search), context.temp_allocator)
 	used := field_key(&t.search, ks, ctrl ? "" : text, ctrl, shift)
 	if used {
-		rebuild_view(a, t)
+		// Caret moves do not search again; edits do.
+		if field_text(&t.search) != before || !is_search(t) { filter_changed(a, t) }
 		a.dirty = true
 	}
 	return used || !ctrl // plain keys never reach the file view while typing
@@ -418,6 +432,11 @@ key_path :: proc(a: ^App, ks: uint, text: string, ctrl, shift: bool) -> bool {
 	case KS_RETURN, KS_KP_ENTER:
 		typed := strings.clone(field_text(&p.path_field), context.temp_allocator)
 		a.focus = .View
+		if strings.has_prefix(typed, "?") {
+			// "?words" in the location bar searches the whole disk.
+			search_open(a, strings.trim_space(typed[1:]))
+			return true
+		}
 		target := absolute_path(typed, t.dir)
 		if is_directory(target) {
 			navigate(a, t, target)
@@ -474,6 +493,9 @@ key_view :: proc(a: ^App, ks: uint, text: string, ctrl, shift, alt: bool) {
 		case 'r', 'R': refresh(a, t); return
 		case '1': set_mode(a, t, .Grid); return
 		case '2': set_mode(a, t, .List); return
+		case KS_RETURN, KS_KP_ENTER:
+			if is_search(t) { search_reveal(a) } // Ctrl+Enter: the containing folder
+			return
 		}
 	}
 	if alt {
@@ -491,6 +513,13 @@ key_view :: proc(a: ^App, ks: uint, text: string, ctrl, shift, alt: bool) {
 		open_selection(a)
 		return
 	case KS_BACKSPACE:
+		if is_search(t) {
+			// Back to editing the query.
+			a.focus = .Search
+			field_key(&t.search, KS_BACKSPACE, "", false, false)
+			filter_changed(a, t)
+			return
+		}
 		go_up(a, t)
 		return
 	case KS_F2:
@@ -509,7 +538,7 @@ key_view :: proc(a: ^App, ks: uint, text: string, ctrl, shift, alt: bool) {
 		if shift { menu_for_keyboard(a) }
 		return
 	case KS_ESCAPE:
-		if field_text(&t.search) != "" {
+		if field_text(&t.search) != "" && !is_search(t) {
 			field_clear(&t.search)
 			rebuild_view(a, t)
 		} else {
@@ -525,7 +554,7 @@ key_view :: proc(a: ^App, ks: uint, text: string, ctrl, shift, alt: bool) {
 	case KS_RIGHT:
 		if t.mode == .Grid {
 			move_cursor(a, t, cur < 0 ? 0 : cur + 1, shift)
-		} else if cur >= 0 && t.entries[t.view[cur]].is_dir {
+		} else if cur >= 0 && t.entries[t.view[cur]].is_dir && !is_search(t) {
 			open_selection(a)
 		}
 		return
@@ -548,12 +577,16 @@ key_view :: proc(a: ^App, ks: uint, text: string, ctrl, shift, alt: bool) {
 		move_cursor(a, t, cur < 0 ? page : cur + page, shift)
 		return
 	}
-	// Typing in the file view starts filtering.
+	// Typing in the file view starts filtering (or goes on with the query).
 	if !ctrl && !alt && text != "" && text != " " {
 		a.focus = .Search
-		field_clear(&t.search)
+		if is_search(t) {
+			t.search.caret, t.search.anchor = len(t.search.buf), len(t.search.buf)
+		} else {
+			field_clear(&t.search)
+		}
 		field_insert(&t.search, text)
-		rebuild_view(a, t)
+		filter_changed(a, t)
 	}
 }
 
