@@ -1,0 +1,14 @@
+#!/bin/sh
+# Spoil launcher: runs the current build from the clone, rebuilding bin/spoil
+# when a source (Spoil's or milk's shared packages) is newer; if a rebuild
+# fails, the previous binary keeps working.
+dir=$(dirname "$(readlink -f "$0")")
+bin="$dir/bin/spoil"
+newest=$(find "$dir/src" "$dir/../milk/src/tx" "$dir/../milk/src/config" "$dir/../milk/src/desktop" -name '*.odin' -newer "$bin" 2>/dev/null | head -n 1)
+if [ ! -x "$bin" ] || [ -n "$newest" ]; then
+    if ! "$dir/build.sh" >&2; then
+        [ -x "$bin" ] || { echo "spoil: build failed and no previous binary exists" >&2; exit 1; }
+        echo "spoil: build failed; starting the previous binary" >&2
+    fi
+fi
+exec "$bin" "$@"
