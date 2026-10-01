@@ -107,7 +107,7 @@ load_config :: proc(a: ^App, first: bool) -> bool {
 		if first { log.info("milk.json not found; using milk's default look") }
 		return first
 	}
-	mt, ok := mtime_of(a.cfg_path)
+	mt, ok := config_stamp(a)
 	a.cfg_mtime = mt
 	if !ok {
 		if first { log.warnf("Cannot read %s; using milk's default look", a.cfg_path) }
@@ -247,10 +247,17 @@ ic_fallback :: proc(ic: Ic) -> string {
 	return "•"
 }
 
+// When milk.json or the wallpaper theme's colours (which config.load applies
+// over it) last changed; false when milk.json cannot be read.
+config_stamp :: proc(a: ^App) -> (i64, bool) {
+	if _, ok := mtime_of(a.cfg_path); !ok { return 0, false }
+	return config.theme_stamp(a.cfg_path), true
+}
+
 // Watch milk.json: returns true when the look changed.
 check_config :: proc(a: ^App) -> bool {
 	if a.cfg_path == "" { return false }
-	mt, ok := mtime_of(a.cfg_path)
+	mt, ok := config_stamp(a)
 	if !ok || mt == a.cfg_mtime { return false }
 	if !load_config(a, false) {
 		a.cfg_mtime = mt // do not retry a broken file every second

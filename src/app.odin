@@ -79,7 +79,7 @@ App :: struct {
 	// milk.json
 	cfg_path:     string,
 	cfg:          ^config.Config, // nil = milk's defaults
-	cfg_mtime:    i64,
+	cfg_mtime:    i64,    // config_stamp of the loaded milk.json
 	next_check:   f64,
 	style:        Style,
 	look:         string, // look_signature of the style in use (owned)
